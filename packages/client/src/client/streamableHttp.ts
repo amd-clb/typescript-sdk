@@ -457,14 +457,13 @@ export class StreamableHTTPClientTransport implements Transport {
         // so previously-granted permissions are not lost on re-authorization.
         const tokens = await this._oauthProvider.tokens();
         const unionScope = computeScopeUnion(this._scope, tokens?.scope, challenge.scope);
-        this._scope = unionScope;
 
         // Superset-gated refresh bypass: refresh cannot widen scope (RFC 6749 §6),
         // so when the union strictly exceeds what the current token was granted
         // we must force a fresh authorization request.
         const forceReauthorization = isStrictScopeSuperset(unionScope, tokens?.scope);
 
-        return auth(this._oauthProvider, {
+        const result = await auth(this._oauthProvider, {
             serverUrl: this._url,
             resourceMetadataUrl: this._resourceMetadataUrl,
             scope: unionScope,
@@ -472,6 +471,9 @@ export class StreamableHTTPClientTransport implements Transport {
             fetchFn: this._fetchWithInit,
             skipIssuerMetadataValidation: this._skipIssuerMetadataValidation
         });
+        // Remember the union only once accepted, so later 401 renewals do not re-request a refused scope.
+        this._scope = unionScope;
+        return result;
     }
 
     /** `baseFetch` with redirects handled as `redirectPolicy` says. */
@@ -610,7 +612,7 @@ export class StreamableHTTPClientTransport implements Transport {
                 if (response.status === 401 && this._authProvider) {
                     if (response.headers.has('www-authenticate')) {
                         const { resourceMetadataUrl, scope } = extractWWWAuthenticateParams(response);
-                        this._resourceMetadataUrl = resourceMetadataUrl;
+                        this._resourceMetadataUrl = resourceMetadataUrl ?? this._resourceMetadataUrl;
                         // Preserve any union accumulated by `_stepUpAuthorize` so a 401
                         // mid-chain does not narrow `_scope` back to the challenge value.
                         this._scope = computeScopeUnion(this._scope, scope);
@@ -621,7 +623,9 @@ export class StreamableHTTPClientTransport implements Transport {
                             await this._authProvider.onUnauthorized({
                                 response,
                                 serverUrl: this._url,
-                                fetchFn: this._fetchWithInit
+                                fetchFn: this._fetchWithInit,
+                                resourceMetadataUrl: this._resourceMetadataUrl,
+                                scope: this._scope
                             });
                         } catch (error) {
                             // Auth-seam stamp: covers the SDK's OAuth flow and
@@ -1073,7 +1077,7 @@ export class StreamableHTTPClientTransport implements Transport {
                     // Store WWW-Authenticate params for interactive finishAuth() path
                     if (response.headers.has('www-authenticate')) {
                         const { resourceMetadataUrl, scope } = extractWWWAuthenticateParams(response);
-                        this._resourceMetadataUrl = resourceMetadataUrl;
+                        this._resourceMetadataUrl = resourceMetadataUrl ?? this._resourceMetadataUrl;
                         // Preserve any union accumulated by `_stepUpAuthorize` so a 401
                         // mid-chain does not narrow `_scope` back to the challenge value.
                         this._scope = computeScopeUnion(this._scope, scope);
@@ -1084,7 +1088,9 @@ export class StreamableHTTPClientTransport implements Transport {
                             await this._authProvider.onUnauthorized({
                                 response,
                                 serverUrl: this._url,
-                                fetchFn: this._fetchWithInit
+                                fetchFn: this._fetchWithInit,
+                                resourceMetadataUrl: this._resourceMetadataUrl,
+                                scope: this._scope
                             });
                         } catch (error) {
                             // Auth-seam stamp: covers the SDK's OAuth flow and

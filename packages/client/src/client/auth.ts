@@ -60,6 +60,10 @@ export interface UnauthorizedContext {
     serverUrl: URL;
     /** Fetch function configured with the transport's `requestInit`, for making auth requests. */
     fetchFn: FetchLike;
+    /** Every scope challenged or requested so far on this transport, including this response's challenge. */
+    scope?: string;
+    /** Resource metadata URL from the transport's latest challenge that carried one. */
+    resourceMetadataUrl?: URL;
 }
 
 /**
@@ -187,11 +191,15 @@ export async function handleOAuthUnauthorized(
     ctx: UnauthorizedContext,
     extraAuthOptions?: Pick<AuthOptions, 'skipIssuerMetadataValidation'>
 ): Promise<void> {
-    const { resourceMetadataUrl, scope } = extractWWWAuthenticateParams(ctx.response);
+    const challenge = extractWWWAuthenticateParams(ctx.response);
+    const tokens = await provider.tokens();
+    // The refresh still runs first; a new authorization keeps earlier grants (e.g. from step-up).
+    const retainScope = computeScopeUnion(tokens?.scope, ctx.scope);
     const result = await auth(provider, {
         serverUrl: ctx.serverUrl,
-        resourceMetadataUrl,
-        scope,
+        resourceMetadataUrl: challenge.resourceMetadataUrl ?? ctx.resourceMetadataUrl,
+        scope: challenge.scope,
+        ...(retainScope ? { retainScope } : {}),
         fetchFn: ctx.fetchFn,
         ...extraAuthOptions
     });
@@ -999,6 +1007,12 @@ export interface AuthOptions {
     iss?: string;
     /** Scope to request; computed by Scope Selection Strategy when omitted. */
     scope?: string;
+    /**
+     * Scope already granted or requested that a new authorization must keep. It is
+     * added to the scope chosen by the Scope Selection Strategy (`scope`, then PRM
+     * `scopes_supported`, then `clientMetadata.scope`) and does not stop a refresh.
+     */
+    retainScope?: string;
     /** Explicit `resource_metadata` URL from a `WWW-Authenticate` challenge. */
     resourceMetadataUrl?: URL;
     /** Custom `fetch` implementation. */
@@ -1131,6 +1145,7 @@ async function authInternal(
         authorizationCode,
         iss,
         scope,
+        retainScope,
         resourceMetadataUrl,
         fetchFn,
         skipIssuerMetadataValidation,
@@ -1275,12 +1290,15 @@ async function authInternal(
     }
 
     // Scope selection used consistently for DCR and the authorization request.
-    const resolvedScope = determineScope({
-        requestedScope: scope,
-        resourceMetadata,
-        authServerMetadata: metadata,
-        clientMetadata: provider.clientMetadata
-    });
+    const resolvedScope = computeScopeUnion(
+        determineScope({
+            requestedScope: scope,
+            resourceMetadata,
+            authServerMetadata: metadata,
+            clientMetadata: provider.clientMetadata
+        }),
+        retainScope
+    );
 
     // Handle client registration if needed. SEP-2352: a stored credential whose `issuer`
     // stamp names a different authorization server reads back as `undefined`, so the flow
